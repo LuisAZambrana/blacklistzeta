@@ -1,86 +1,73 @@
 #!/bin/bash
-# Script para generar blackdomains.txt localmente
-# Uso: ./generar_blacklist.sh [--latam] [--pais PAIS]
+# Blacklist Generator con FireHOL + Fuentes Premium
+# Incluye: FireHOL, Spamhaus, Cloudflare Radar, Abuse.ch, SURBL
 
 # Configuración
-OUTPUT_FILE="blackdomains.txt"
+OUTPUT_FILE="blackdomains_pro.txt"
 TEMP_FILE=$(mktemp)
-LOG_FILE="blacklist_log.txt"
+LOG_FILE="blacklist_firehol.log"
+CLOUDFLARE_API_KEY="TU_API_KEY_CLOUDFLARE"  # Opcional pero sin esto tarda mas
 
-# Inicializar archivos
-echo "=== Inicio de generación: $(date) ===" > "$LOG_FILE"
+# Inicialización
+echo "=== Generación iniciada: $(date) ===" > "$LOG_FILE"
 > "$OUTPUT_FILE"
 
-## 1. Listas Globales (siempre se incluyen)
-echo "Descargando listas globales..." >> "$LOG_FILE"
+## 1. FireHOL (Listas destacadas)
+echo "[+] Descargando FireHOL IPLists..." >> "$LOG_FILE"
+firehol_lists=(
+    "https://iplists.firehol.org/files/firehol_level1.netset"  # Anonymizers
+    "https://iplists.firehol.org/files/firehol_level3.netset"  # Abusers
+    "https://iplists.firehol.org/files/firehol_webclient.netset" # Malicious web clients
+)
 
-# Spamhaus DBL (Dominios de spam)
-echo " - Spamhaus DBL" >> "$LOG_FILE"
+for list in "${firehol_lists[@]}"; do
+    echo " - Procesando $list..." >> "$LOG_FILE"
+    curl -s "$list" 2>> "$LOG_FILE" | \
+        grep -E '^[0-9]' | awk '{print $1}' >> "$TEMP_FILE"
+done
+
+## 2. Spamhaus DBL (Dominios)
+echo "[+] Descargando Spamhaus DBL..." >> "$LOG_FILE"
 curl -s "https://www.spamhaus.org/drop/dbl.txt" 2>> "$LOG_FILE" | \
-  grep -v '^;' | awk '{print $1}' >> "$TEMP_FILE"
+    grep -v '^;' | awk '{print $1}' >> "$TEMP_FILE"
 
-# URLhaus (Malware activo)
-echo " - URLhaus" >> "$LOG_FILE"
+## 3. Abuse.ch URLhaus (Malware)
+echo "[+] Descargando URLhaus..." >> "$LOG_FILE"
 curl -s "https://urlhaus.abuse.ch/downloads/text_online/" 2>> "$LOG_FILE" | \
-  grep -E '^http[s]?://' | awk -F/ '{print $3}' >> "$TEMP_FILE"
+    grep -E '^http[s]?://' | awk -F/ '{print $3}' >> "$TEMP_FILE"
 
-## 2. Listas Latinoamericanas (opcional con --latam)
-if [[ "$*" == *"--latam"* ]]; then
-    echo "Descargando listas LATAM..." >> "$LOG_FILE"
-    
-    # CERT.AR (Argentina)
-    echo " - CERT.AR" >> "$LOG_FILE"
-    curl -s "https://www.cert.ar/feed/phishing-domains.txt" 2>> "$LOG_FILE" >> "$TEMP_FILE"
-    
-    # Dominios LATAM (extensiones regionales)
-    echo " - Filtro LATAM" >> "$LOG_FILE"
-    curl -s "https://urlhaus.abuse.ch/downloads/text_online/" 2>> "$LOG_FILE" | \
-      grep -E '\.(ar|br|cl|co|mx|pe|uy|py|cr|do|gt)$' | \
-      awk -F/ '{print $3}' >> "$TEMP_FILE"
+## 4. SURBL (Dominios maliciosos)
+echo "[+] Descargando SURBL..." >> "$LOG_FILE"
+curl -s "http://www.surbl.org/static/lists/surbl.txt" 2>> "$LOG_FILE" >> "$TEMP_FILE"
+
+## 5. Cloudflare Radar (Opcional - requiere API)
+if [ -n "$CLOUDFLARE_API_KEY" ]; then
+    echo "[+] Consultando Cloudflare Radar..." >> "$LOG_FILE"
+    curl -s -X GET \
+        "https://api.cloudflare.com/client/v4/radar/ranking/top/domains/malicious?limit=100" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_KEY" 2>> "$LOG_FILE" | \
+        jq -r '.data.domains[].domain' >> "$TEMP_FILE"
 fi
 
-## 3. Listas por País (opcional con --pais)
-if [[ "$*" == *"--pais"* ]]; then
-    country=$(echo "$*" | grep -oP '(?<=--pais )\w+')
-    echo "Descargando listas para $country..." >> "$LOG_FILE"
-    
-    case $country in
-        argentina|ar)
-            # Lista adicional para Argentina
-            curl -s "https://lista.negra.argentina.local/dominios.txt" 2>> "$LOG_FILE" >> "$TEMP_FILE"
-            ;;
-        brasil|br)
-            # CERT.br
-            curl -s "https://www.cert.br/docs/blacklist.txt" 2>> "$LOG_FILE" >> "$TEMP_FILE"
-            ;;
-        chile|cl)
-            # CSIRT Chile
-            curl -s "https://www.csirt.gob.cl/alertas/dominios-maliciosos.txt" 2>> "$LOG_FILE" >> "$TEMP_FILE"
-            ;;
-        mexico|mx)
-            # CERT-MX
-            curl -s "https://www.cert-mx.org/malicious-domains.txt" 2>> "$LOG_FILE" >> "$TEMP_FILE"
-            ;;
-        *)
-            echo "País no reconocido: $country" >> "$LOG_FILE"
-            ;;
-    esac
-fi
+## Procesamiento avanzado
+echo "[+] Filtrando y ordenando..." >> "$LOG_FILE"
 
-## Procesamiento final
-echo "Procesando lista final..." >> "$LOG_FILE"
+# 1. Eliminar IPs (solo mantener dominios) - Sino queres que las elimines comenta!
+grep -E '^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$' "$TEMP_FILE" > "${TEMP_FILE}_filtered"
 
-# Ordenar y eliminar duplicados
-sort -u "$TEMP_FILE" > "$OUTPUT_FILE"
+# 2. Ordenar y eliminar duplicados
+sort -u "${TEMP_FILE}_filtered" > "$OUTPUT_FILE"
 
-# Estadísticas finales
+# 3. Eliminar subdominios no útiles (opcional) - Sino queres que las elimines comenta!
+sed -i '/^[^.]*\.[^.]*$/!d' "$OUTPUT_FILE"  # Solo mantener dominio+TLD
+
+# Estadísticas
 LINES_TOTAL=$(wc -l < "$OUTPUT_FILE")
-echo "=== Generación completada ===" >> "$LOG_FILE"
-echo "Dominios en lista: $LINES_TOTAL" >> "$LOG_FILE"
-echo "Archivo generado: $OUTPUT_FILE" >> "$LOG_FILE"
+echo "[+] Dominios en lista final: $LINES_TOTAL" >> "$LOG_FILE"
+echo "=== Generación completada: $(date) ===" >> "$LOG_FILE"
 
 # Limpieza
-rm "$TEMP_FILE"
+rm "$TEMP_FILE" "${TEMP_FILE}_filtered"
 
-echo "¡Listo! Archivo $OUTPUT_FILE generado correctamente."
-echo "Detalles del proceso en $LOG_FILE"
+echo "¡Listo! Blacklist generada en: $OUTPUT_FILE"
+echo "Log completo en: $LOG_FILE"
